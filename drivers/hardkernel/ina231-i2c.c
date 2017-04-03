@@ -30,6 +30,7 @@ static 	int  	        ina231_i2c_probe	(struct i2c_client *client, const struct 
         int 	        ina231_i2c_read     (struct i2c_client *client, unsigned char cmd);
         int 	        ina231_i2c_write    (struct i2c_client *client, unsigned char cmd, unsigned short data);
         void            ina231_i2c_enable   (struct ina231_sensor *sensor);
+        void            ina231_i2c_enable_id(int sensor_id);
 static 	void 	        ina231_work		    (struct work_struct *work);
 
 static enum hrtimer_restart ina231_timer    (struct hrtimer *timer);
@@ -114,11 +115,28 @@ int 	ina231_i2c_write(struct i2c_client *client, unsigned char cmd, unsigned sho
 	return ret;
 }
 
+static struct ina231_sensor *g_sensor[4];
+
 //[*]--------------------------------------------------------------------------------------------------[*]
 void    ina231_i2c_enable(struct ina231_sensor *sensor)
 {
     hrtimer_start(&sensor->timer, ktime_set(sensor->timer_sec, sensor->timer_nsec), HRTIMER_MODE_REL);
 }
+
+void    ina231_i2c_enable_id(int sensor_id)
+{
+	g_sensor[sensor_id]->pd->enable = 1;
+	g_sensor[sensor_id]->total_uW = 0;
+	g_sensor[sensor_id]->total_periods = 0;
+	ina231_i2c_enable(g_sensor[sensor_id]);
+}
+EXPORT_SYMBOL(ina231_i2c_enable_id);
+
+void    ina231_i2c_disable_id(int sensor_id)
+{
+	g_sensor[sensor_id]->pd->enable = 0;
+}
+EXPORT_SYMBOL(ina231_i2c_disable_id);
 
 //[*]--------------------------------------------------------------------------------------------------[*]
 static 	void 	ina231_work		(struct work_struct *work)
@@ -137,6 +155,8 @@ static 	void 	ina231_work		(struct work_struct *work)
         if((sensor->cur_uV > sensor->max_uV) || (sensor->cur_uA > sensor->cur_uA))  {
             sensor->max_uV = sensor->cur_uV;    sensor->max_uA = sensor->cur_uA;    sensor->max_uW = sensor->cur_uW;
         }
+    	sensor->total_uW += sensor->cur_uW;
+    	sensor->total_periods++;
     	mutex_unlock(&sensor->mutex);
     }
     else    {
@@ -186,12 +206,28 @@ static int  ina231_i2c_dt_parse(struct i2c_client *client, struct ina231_sensor 
 	
 	if (of_property_read_u32(sensor_np, "shunt_R_mohm", &rdata))            return  -1;
 	sensor->pd->shunt_R_mohm = rdata;
-	
+
+    /* 0x44DF: 0100 0100 1101 1111
+     *  RST: 0100: none
+     *  AVG:  010: 16 times
+     * Vbus:  011: 588 us
+     *  Vsh:  011: 588 us
+     * Mode:  111: shunt, bus, continuous
+     *
+     * 0x4327: 0100 0011 0010 0111
+     * 0x4127: 0100 0001 0010 0111
+     * 0x42DF: 0100 0010 1101 1111
+    */
 	if (of_property_read_u32(sensor_np, "config", &rdata))                  return  -1;
-	sensor->pd->config = rdata;
-	
-	if (of_property_read_u32(sensor_np, "update_period", &rdata))           return  -1;
-	sensor->pd->update_period = rdata;
+//	sensor->pd->config = rdata;
+//    sensor->pd->config = 0x44DF;    // donny - 16 x 588us = ~10ms
+//    sensor->pd->config = 0x4327;    // donny - 4 x 1.1ms = ~5ms
+//    sensor->pd->config = 0x4127;    // donny - 1 x 1.1ms = ~1ms
+    sensor->pd->config = 0x42DF;    // donny - 1 x 2.1ms = ~2ms
+
+    if (of_property_read_u32(sensor_np, "update_period", &rdata))           return  -1;
+//    sensor->pd->update_period = rdata;
+    sensor->pd->update_period = 3000; // 3ms
 
     return  0;
 }
@@ -272,12 +308,33 @@ static int 	ina231_i2c_probe(struct i2c_client *client, const struct i2c_device_
     dev_info(&client->dev, "Conversion Time : %d us\n"  , sensor->pd->update_period );
     dev_info(&client->dev, "=====================================================\n");
     
+    if (0 == strcmp(sensor->pd->name + 7, "arm")) {
+        g_sensor[0] = sensor;
+    } else if (0 == strcmp(sensor->pd->name + 7, "kfc")) {
+        g_sensor[1] = sensor;
+    } else if (0 == strcmp(sensor->pd->name + 7, "g3d")) {
+        g_sensor[2] = sensor;
+    } else if (0 == strcmp(sensor->pd->name + 7, "mem")) {
+        g_sensor[3] = sensor;
+    }
+
     return  0;
 out:
     dev_err(&client->dev, "============= Probe INA231 Fail! : %s (0x%04X) ============= \n", sensor->pd->name, rc); 
 
 	return rc;
 }
+
+unsigned int ina231_i2c_get_power_uW(int sensor_id)
+{
+    if(g_sensor[sensor_id]->total_periods == 0)
+        return 0;
+    else {
+//    	printk(KERN_INFO"GET POWER (%d) = %du / %du\n", sensor_id, g_sensor[sensor_id]->total_uW, g_sensor[sensor_id]->total_periods);
+        return  g_sensor[sensor_id]->total_uW / g_sensor[sensor_id]->total_periods;
+    }
+}
+EXPORT_SYMBOL(ina231_i2c_get_power_uW);
 
 //[*]--------------------------------------------------------------------------------------------------[*]
 static int 	ina231_i2c_remove(struct i2c_client *client)

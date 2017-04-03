@@ -154,6 +154,9 @@ struct ina231_sensor    {
 	unsigned int            max_uV;
 	unsigned int            max_uW;
 
+	unsigned int            total_uW;
+	unsigned int			total_periods;
+
 	struct hrtimer          timer;
 	unsigned int            timer_sec, timer_nsec;
 	struct work_struct  	work;
